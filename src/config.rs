@@ -41,6 +41,18 @@ max_tracked_bytes = 1048576
 flag_symlinks = true
 # How many recent commits to scan beyond HEAD
 recent_commits = 20
+
+[reflog_scanner]
+# Author emails to flag in reflog (unreachable AI commits)
+ai_emails = ["noreply@anthropic.com", "noreply@openai.com"]
+# Max reflog entries to inspect per ref
+max_entries_per_ref = 1000
+
+[author_scanner]
+# How many recent commits to analyze
+window_size = 100
+# Flag repo if AI-authored commit ratio exceeds this
+flag_if_ai_ratio_above = 0.3
 "#;
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -49,6 +61,10 @@ pub struct Config {
     pub branch_scanner: BranchConfig,
     #[serde(default)]
     pub tree_scanner: TreeConfig,
+    #[serde(default)]
+    pub reflog_scanner: ReflogConfig,
+    #[serde(default)]
+    pub author_scanner: AuthorConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -97,6 +113,43 @@ impl Default for TreeConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReflogConfig {
+    #[serde(default = "default_emails")]
+    pub ai_emails: Vec<String>,
+    #[serde(default = "default_max_entries_per_ref")]
+    pub max_entries_per_ref: usize,
+}
+
+impl Default for ReflogConfig {
+    fn default() -> Self {
+        Self {
+            ai_emails: default_emails(),
+            max_entries_per_ref: default_max_entries_per_ref(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthorConfig {
+    #[serde(default = "default_emails")]
+    pub ai_emails: Vec<String>,
+    #[serde(default = "default_window_size")]
+    pub window_size: u32,
+    #[serde(default = "default_ai_ratio_threshold")]
+    pub flag_if_ai_ratio_above: f64,
+}
+
+impl Default for AuthorConfig {
+    fn default() -> Self {
+        Self {
+            ai_emails: default_emails(),
+            window_size: default_window_size(),
+            flag_if_ai_ratio_above: default_ai_ratio_threshold(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PatternRule {
     pub pattern: String,
@@ -133,6 +186,18 @@ fn default_flag_symlinks() -> bool {
 
 fn default_recent_commits() -> u32 {
     20
+}
+
+fn default_max_entries_per_ref() -> usize {
+    1000
+}
+
+fn default_window_size() -> u32 {
+    100
+}
+
+fn default_ai_ratio_threshold() -> f64 {
+    0.3
 }
 
 fn default_tree_patterns() -> Vec<PatternRule> {

@@ -40,7 +40,7 @@ enum Command {
         /// Path to the repository (defaults to cwd)
         #[arg(default_value = ".")]
         path: PathBuf,
-        /// Only run a specific scanner kind (branch, tree). Repeat for multiple.
+        /// Only run a specific scanner kind (branch, tree, reflog, author). Repeat for multiple.
         #[arg(long)]
         kind: Vec<ScannerKindArg>,
         /// Output format
@@ -67,6 +67,8 @@ enum Command {
 enum ScannerKindArg {
     Branch,
     Tree,
+    Reflog,
+    Author,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -116,12 +118,20 @@ fn cmd_scan(
     let mut findings = Vec::new();
     let run_branch = kinds.is_empty() || kinds.iter().any(|k| matches!(k, ScannerKindArg::Branch));
     let run_tree = kinds.is_empty() || kinds.iter().any(|k| matches!(k, ScannerKindArg::Tree));
+    let run_reflog = kinds.is_empty() || kinds.iter().any(|k| matches!(k, ScannerKindArg::Reflog));
+    let run_author = kinds.is_empty() || kinds.iter().any(|k| matches!(k, ScannerKindArg::Author));
 
     if run_branch {
         findings.extend(scanner::branch::scan(&path, &cfg.branch_scanner)?);
     }
     if run_tree {
         findings.extend(scanner::tree::scan(&path, &cfg.tree_scanner)?);
+    }
+    if run_reflog {
+        findings.extend(scanner::reflog::scan(&path, &cfg.reflog_scanner)?);
+    }
+    if run_author {
+        findings.extend(scanner::author::scan(&path, &cfg.author_scanner)?);
     }
 
     findings.retain(|f| f.severity as u8 >= min_sev as u8);
