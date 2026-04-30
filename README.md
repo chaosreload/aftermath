@@ -12,7 +12,8 @@ AI coding agents (Claude Code, Codex, Cursor, Aider, OpenClaw…) leave behind *
 
 - **Git branches** that were an experiment and never cleaned up (`claude/refactor-attempt-3`)
 - **Trees polluted by `git add -A`** — `.venv/`, `node_modules/`, `PR-*-description.md` drafts, `.env` leaks, symlinks
-- **Commits authored by AI** that drift away from `main`
+- **Unreachable AI commits** lurking in `git reflog` after resets/rebases
+- **AI-dominated authorship** — flags repos where AI-authored commits exceed a configurable ratio
 
 `aftermath` walks your repo and reports these with an evidence chain, a severity, and (when safe) a suggested command. It **never modifies your repo in v0.1.**
 
@@ -61,6 +62,8 @@ aftermath scan /path/to/repo
 # Only run one scanner
 aftermath scan --kind=tree
 aftermath scan --kind=branch
+aftermath scan --kind=reflog
+aftermath scan --kind=author
 
 # Different output formats
 aftermath scan --format=json
@@ -137,8 +140,8 @@ This is a deliberate PoC. Ship small → validate on real repos → let contribu
 v0.1 scope:
 - ✅ `branch_scanner` — AI-prefix / stale / behind-main detection
 - ✅ `tree_scanner` — `.gitignore`-style patterns + size + symlink checks
-- ⏳ `reflog_scanner` — AI commits discoverable only via reflog (v0.1.x)
-- ⏳ `author_scanner` — commit author distribution analysis (v0.1.x)
+- ✅ `reflog_scanner` — unreachable AI commits discoverable only via reflog
+- ✅ `author_scanner` — commit author distribution analysis (flags high AI ratio)
 
 Roadmap:
 - **v0.2** — cloud resource scanner (AWS Lambda / IAM / S3)
