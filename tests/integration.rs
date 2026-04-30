@@ -28,8 +28,18 @@ fn sh(cwd: &Path, cmd: &str) {
 }
 
 fn scan_json(repo: &Path) -> serde_json::Value {
+    scan_json_kind(repo, None)
+}
+
+fn scan_json_kind(repo: &Path, kind: Option<&str>) -> serde_json::Value {
+    let mut args = vec!["scan", repo.to_str().unwrap(), "--format=json"];
+    let kind_arg;
+    if let Some(k) = kind {
+        kind_arg = format!("--kind={}", k);
+        args.push(&kind_arg);
+    }
     let out = Command::new(bin_path())
-        .args(["scan", repo.to_str().unwrap(), "--format=json"])
+        .args(&args)
         .output()
         .expect("failed to spawn aftermath");
     assert!(
@@ -260,6 +270,118 @@ fn finding_ids_are_stable_across_runs() {
         f1, f2,
         "two scans of the same repo must produce identical output"
     );
+}
+
+/// Scenario: AI commit in reflog after `git reset --hard HEAD~1` — unreachable from any branch.
+#[test]
+fn detects_ai_commit_in_reflog_after_reset() {
+    let dir = tempdir("reflog-reset");
+    init_repo(&dir, "dev@example.com", "Dev");
+
+    sh(
+        &dir,
+        "echo 'v1' > app.py && git add app.py && git commit -q -m 'initial'",
+    );
+    // Make an AI-authored commit
+    sh(
+        &dir,
+        "git config user.email 'noreply@anthropic.com' && git config user.name 'Claude Code' && \
+         echo 'ai change' >> app.py && git commit -qam 'feat: ai improvement'",
+    );
+    // Reset it away — commit is now only in reflog
+    sh(&dir, "git reset --hard HEAD~1");
+    // Restore human author for any future commits
+    sh(
+        &dir,
+        "git config user.email 'dev@example.com' && git config user.name 'Dev'",
+    );
+
+    let findings = scan_json_kind(&dir, Some("reflog"));
+    let reflog_findings = findings_matching(&findings, |f| f["scanner"] == "reflog");
+    assert_eq!(
+        reflog_findings.len(),
+        1,
+        "expected 1 reflog finding, got {findings:#?}"
+    );
+    assert_eq!(reflog_findings[0]["severity"], "low");
+    // Check evidence contains commit_sha and author_email
+    let evidence: Vec<String> = reflog_findings[0]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["type"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(evidence.contains(&"commit_sha".to_string()));
+    assert!(evidence.contains(&"author_email".to_string()));
+    assert!(evidence.contains(&"reflog_source".to_string()));
+}
+
+/// Scenario: AI commit still reachable from branch — reflog scanner must NOT flag it.
+#[test]
+fn reflog_scanner_ignores_commits_reachable_from_branch() {
+    let dir = tempdir("reflog-reachable");
+    init_repo(&dir, "noreply@anthropic.com", "Claude Code");
+
+    sh(
+        &dir,
+        "echo 'ai code' > app.py && git add app.py && git commit -q -m 'feat: ai commit'",
+    );
+
+    let findings = scan_json_kind(&dir, Some("reflog"));
+    let reflog_findings = findings_matching(&findings, |f| f["scanner"] == "reflog");
+    assert!(
+        reflog_findings.is_empty(),
+        "expected 0 reflog findings for reachable commit, got {findings:#?}"
+    );
+}
+
+/// Scenario: repo with 5 human + 5 AI commits — author scanner flags ai_ratio=0.50.
+#[test]
+fn author_scanner_flags_ai_dominated_repo() {
+    let dir = tempdir("author-ratio");
+    init_repo(&dir, "dev@example.com", "Dev");
+
+    // 5 human commits
+    for i in 1..=5 {
+        sh(
+            &dir,
+            &format!(
+                "echo 'human {}' >> app.py && git add app.py && git commit -q -m 'human commit {}'",
+                i, i
+            ),
+        );
+    }
+    // Switch to AI author for 5 commits
+    sh(
+        &dir,
+        "git config user.email 'noreply@anthropic.com' && git config user.name 'Claude Code'",
+    );
+    for i in 1..=5 {
+        sh(
+            &dir,
+            &format!(
+                "echo 'ai {}' >> app.py && git add app.py && git commit -q -m 'ai commit {}'",
+                i, i
+            ),
+        );
+    }
+
+    let findings = scan_json_kind(&dir, Some("author"));
+    let author_findings = findings_matching(&findings, |f| f["scanner"] == "author");
+    assert_eq!(
+        author_findings.len(),
+        1,
+        "expected 1 author finding, got {findings:#?}"
+    );
+    assert_eq!(author_findings[0]["severity"], "medium");
+    // Check ai_ratio evidence
+    let ratio = author_findings[0]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["type"] == "ai_ratio")
+        .expect("missing ai_ratio evidence");
+    assert_eq!(ratio["value"], "0.50");
 }
 
 // --- tempdir helper --------------------------------------------------------
