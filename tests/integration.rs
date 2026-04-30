@@ -39,9 +39,8 @@ fn scan_json(repo: &Path) -> serde_json::Value {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8(out.stdout).unwrap();
-    serde_json::from_str(&stdout).unwrap_or_else(|e| {
-        panic!("aftermath stdout is not json: {e}\n---\n{stdout}")
-    })
+    serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("aftermath stdout is not json: {e}\n---\n{stdout}"))
 }
 
 fn init_repo(dir: &Path, author_email: &str, author_name: &str) {
@@ -50,10 +49,10 @@ fn init_repo(dir: &Path, author_email: &str, author_name: &str) {
     sh(dir, &format!("git config user.name '{author_name}'"));
 }
 
-fn findings_matching<'a>(
-    findings: &'a serde_json::Value,
+fn findings_matching(
+    findings: &serde_json::Value,
     predicate: impl Fn(&serde_json::Value) -> bool,
-) -> Vec<&'a serde_json::Value> {
+) -> Vec<&serde_json::Value> {
     findings
         .as_array()
         .map(|arr| arr.iter().filter(|f| predicate(f)).collect())
@@ -70,15 +69,22 @@ fn detects_venv_pollution_from_git_add_all() {
     init_repo(&dir, "noreply@anthropic.com", "Claude Code");
 
     sh(&dir, "mkdir -p .venv/lib/python3.11/site-packages");
-    sh(&dir, "echo 'stub' > .venv/lib/python3.11/site-packages/typing_extensions.py");
+    sh(
+        &dir,
+        "echo 'stub' > .venv/lib/python3.11/site-packages/typing_extensions.py",
+    );
     sh(&dir, "echo 'pyvenv' > .venv/pyvenv.cfg");
     sh(&dir, "mkdir -p app && echo 'print(1)' > app/main.py");
     // Explicitly commit via 'git add .' to emulate the 'git add -A' mistake.
-    sh(&dir, "git add . && git commit -q -m 'fix: add typing_extensions'");
+    sh(
+        &dir,
+        "git add . && git commit -q -m 'fix: add typing_extensions'",
+    );
 
     let findings = scan_json(&dir);
-    let venv_findings =
-        findings_matching(&findings, |f| f["locator"].as_str().unwrap_or("").starts_with(".venv"));
+    let venv_findings = findings_matching(&findings, |f| {
+        f["locator"].as_str().unwrap_or("").starts_with(".venv")
+    });
     assert!(
         venv_findings.len() >= 5,
         "expected >=5 .venv findings, got {}: {:#?}",
@@ -98,13 +104,17 @@ fn detects_pr_description_draft() {
     init_repo(&dir, "dev@example.com", "Dev");
 
     sh(&dir, "echo '# PR desc' > PR-694-description.md");
-    sh(&dir, "echo '# other draft' > PR-fix-typeddict-description.md");
+    sh(
+        &dir,
+        "echo '# other draft' > PR-fix-typeddict-description.md",
+    );
     sh(&dir, "mkdir -p app && echo 'x=1' > app/main.py");
     sh(&dir, "git add . && git commit -q -m 'chore'");
 
     let findings = scan_json(&dir);
-    let pr_findings =
-        findings_matching(&findings, |f| f["locator"].as_str().unwrap_or("").starts_with("PR-"));
+    let pr_findings = findings_matching(&findings, |f| {
+        f["locator"].as_str().unwrap_or("").starts_with("PR-")
+    });
     assert_eq!(
         pr_findings.len(),
         2,
@@ -128,11 +138,17 @@ fn detects_env_leak_as_critical() {
     sh(&dir, "git add . && git commit -q -m 'feat: add app'");
 
     let findings = scan_json(&dir);
-    let env_findings =
-        findings_matching(&findings, |f| f["locator"] == ".env");
-    assert_eq!(env_findings.len(), 1, "expected 1 .env finding, got {findings:#?}");
+    let env_findings = findings_matching(&findings, |f| f["locator"] == ".env");
+    assert_eq!(
+        env_findings.len(),
+        1,
+        "expected 1 .env finding, got {findings:#?}"
+    );
     assert_eq!(env_findings[0]["severity"], "critical");
-    assert_eq!(env_findings[0]["suggested_action"]["kind"], "review_and_confirm");
+    assert_eq!(
+        env_findings[0]["suggested_action"]["kind"],
+        "review_and_confirm"
+    );
 }
 
 /// Scenario: AI agent opened a `claude/<...>` branch, made a commit, then abandoned it.
@@ -142,7 +158,10 @@ fn detects_abandoned_ai_branch() {
     let dir = tempdir("abandoned-branch");
     init_repo(&dir, "dev@example.com", "Dev");
 
-    sh(&dir, "echo 'v1' > app.py && git add app.py && git commit -q -m 'initial'");
+    sh(
+        &dir,
+        "echo 'v1' > app.py && git add app.py && git commit -q -m 'initial'",
+    );
     sh(&dir, "git checkout -q -b claude/refactor-session");
     sh(
         &dir,
@@ -159,8 +178,7 @@ fn detects_abandoned_ai_branch() {
 
     let findings = scan_json(&dir);
     let branch_findings = findings_matching(&findings, |f| {
-        f["scanner"] == "branch"
-            && f["locator"].as_str().unwrap_or("") == "claude/refactor-session"
+        f["scanner"] == "branch" && f["locator"].as_str().unwrap_or("") == "claude/refactor-session"
     });
     assert_eq!(
         branch_findings.len(),
@@ -191,11 +209,15 @@ fn detects_large_binary_blob() {
         "dd if=/dev/zero of=model-cache.bin bs=1024 count=2048 2>/dev/null",
     );
     sh(&dir, "echo 'src' > src.py");
-    sh(&dir, "git add . && git commit -q -m 'accidentally add cache'");
+    sh(
+        &dir,
+        "git add . && git commit -q -m 'accidentally add cache'",
+    );
 
     let findings = scan_json(&dir);
     let large = findings_matching(&findings, |f| {
-        f["locator"] == "model-cache.bin" && f["title"].as_str().unwrap_or("").contains("Large binary")
+        f["locator"] == "model-cache.bin"
+            && f["title"].as_str().unwrap_or("").contains("Large binary")
     });
     assert_eq!(
         large.len(),
@@ -234,7 +256,10 @@ fn finding_ids_are_stable_across_runs() {
 
     let f1 = scan_json(&dir);
     let f2 = scan_json(&dir);
-    assert_eq!(f1, f2, "two scans of the same repo must produce identical output");
+    assert_eq!(
+        f1, f2,
+        "two scans of the same repo must produce identical output"
+    );
 }
 
 // --- tempdir helper --------------------------------------------------------
