@@ -1,6 +1,6 @@
 [package]
 name = "aftermath"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.93"
 description = "Scan Git repos for AI-agent footprints (abandoned branches, polluted trees, suspicious commits)"
