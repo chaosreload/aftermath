@@ -133,6 +133,10 @@ flag_symlinks     = true
 recent_commits    = 20
 ```
 
+## Tuning noise
+
+The large-binary heuristic skips files under common documentation directories (`docs/`, `assets/`, `public/`, `static/`, `media/`, `images/`, `img/`, `website/`) by default. To flag large binaries everywhere, set `large_binary_skip_prefixes = []` in your `.aftermath.toml`. Directory-pattern findings (`.venv/`, `node_modules/`) are automatically collapsed into a single finding with a `child_count` evidence entry.
+
 ## Why v0.1 is tiny
 
 This is a deliberate PoC. Ship small → validate on real repos → let contributor ideas pick the roadmap.

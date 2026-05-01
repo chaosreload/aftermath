@@ -93,18 +93,30 @@ fn detects_venv_pollution_from_git_add_all() {
 
     let findings = scan_json(&dir);
     let venv_findings = findings_matching(&findings, |f| {
-        f["locator"].as_str().unwrap_or("").starts_with(".venv")
+        f["locator"].as_str().unwrap_or("") == ".venv"
     });
-    assert!(
-        venv_findings.len() >= 5,
-        "expected >=5 .venv findings, got {}: {:#?}",
+    assert_eq!(
+        venv_findings.len(),
+        1,
+        "expected 1 collapsed .venv finding, got {}: {:#?}",
         venv_findings.len(),
         findings
     );
-    for f in &venv_findings {
-        assert_eq!(f["severity"], "high");
-        assert_eq!(f["suggested_action"]["kind"], "safe_to_delete");
-    }
+    let f = venv_findings[0];
+    assert_eq!(f["severity"], "high");
+    assert_eq!(f["suggested_action"]["kind"], "safe_to_delete");
+    // Check child_count evidence
+    let child_count = f["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["type"] == "child_count")
+        .expect("missing child_count evidence");
+    assert!(
+        child_count["value"].as_u64().unwrap() >= 2,
+        "expected child_count >= 2, got {:?}",
+        child_count["value"]
+    );
 }
 
 /// Scenario: agent drafted PR description as a working file and forgot to gitignore it.
@@ -234,7 +246,7 @@ fn detects_large_binary_blob() {
         1,
         "expected large binary finding, got {findings:#?}"
     );
-    assert_eq!(large[0]["severity"], "medium");
+    assert_eq!(large[0]["severity"], "low");
 }
 
 /// Scenario: a clean repo (just code + .gitignore) must produce zero findings.
@@ -382,6 +394,158 @@ fn author_scanner_flags_ai_dominated_repo() {
         .find(|e| e["type"] == "ai_ratio")
         .expect("missing ai_ratio evidence");
     assert_eq!(ratio["value"], "0.50");
+}
+
+/// Collapse: commit .venv/lib/a.py + .venv/pyvenv.cfg → exactly 1 finding with child_count=2
+#[test]
+fn tree_nested_venv_collapsed() {
+    let dir = tempdir("nested-venv-collapse");
+    init_repo(&dir, "dev@example.com", "Dev");
+
+    sh(&dir, "mkdir -p .venv/lib");
+    sh(&dir, "echo 'stub' > .venv/lib/a.py");
+    sh(&dir, "echo 'pyvenv' > .venv/pyvenv.cfg");
+    sh(&dir, "echo 'src' > main.py");
+    sh(&dir, "git add . && git commit -q -m 'add venv'");
+
+    let findings = scan_json_kind(&dir, Some("tree"));
+    let venv = findings_matching(&findings, |f| f["locator"] == ".venv");
+    assert_eq!(
+        venv.len(),
+        1,
+        "expected 1 collapsed .venv finding, got {}: {:#?}",
+        venv.len(),
+        findings
+    );
+    let child_count = venv[0]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["type"] == "child_count")
+        .expect("missing child_count evidence");
+    // .venv/lib (dir) + .venv/lib/a.py + .venv/pyvenv.cfg = 3 children
+    assert_eq!(
+        child_count["value"].as_u64().unwrap(),
+        3,
+        "expected child_count=3, got {:?}",
+        child_count["value"]
+    );
+}
+
+/// Two distinct forbidden patterns (.venv/ + node_modules/) → 2 separate findings
+#[test]
+fn tree_two_distinct_forbidden_patterns_not_merged() {
+    let dir = tempdir("two-patterns");
+    init_repo(&dir, "dev@example.com", "Dev");
+
+    sh(&dir, "mkdir -p .venv && echo 'x' > .venv/a");
+    sh(&dir, "mkdir -p node_modules && echo 'y' > node_modules/b");
+    sh(&dir, "echo 'src' > main.py");
+    sh(&dir, "git add . && git commit -q -m 'add both'");
+
+    let findings = scan_json_kind(&dir, Some("tree"));
+    let forbidden = findings_matching(&findings, |f| {
+        let loc = f["locator"].as_str().unwrap_or("");
+        loc == ".venv" || loc == "node_modules"
+    });
+    assert_eq!(
+        forbidden.len(),
+        2,
+        "expected 2 distinct forbidden-path findings, got {}: {:#?}",
+        forbidden.len(),
+        findings
+    );
+}
+
+/// Large binary under docs/ → suppressed (0 findings)
+#[test]
+fn tree_large_binary_in_docs_suppressed() {
+    let dir = tempdir("docs-binary-skip");
+    init_repo(&dir, "dev@example.com", "Dev");
+
+    sh(&dir, "mkdir -p docs/img");
+    sh(
+        &dir,
+        "dd if=/dev/zero of=docs/img/big.png bs=1024 count=2048 2>/dev/null",
+    );
+    sh(&dir, "echo 'src' > main.py");
+    sh(&dir, "git add . && git commit -q -m 'add docs image'");
+
+    let findings = scan_json_kind(&dir, Some("tree"));
+    let large = findings_matching(&findings, |f| {
+        f["title"].as_str().unwrap_or("").contains("Large binary")
+    });
+    assert_eq!(
+        large.len(),
+        0,
+        "expected 0 large-binary findings under docs/, got {}: {:#?}",
+        large.len(),
+        findings
+    );
+}
+
+/// Large binary at repo root → 1 finding, severity low
+#[test]
+fn tree_large_binary_outside_docs_still_flagged() {
+    let dir = tempdir("root-binary");
+    init_repo(&dir, "dev@example.com", "Dev");
+
+    sh(
+        &dir,
+        "dd if=/dev/zero of=big.bin bs=1024 count=2048 2>/dev/null",
+    );
+    sh(&dir, "echo 'src' > main.py");
+    sh(&dir, "git add . && git commit -q -m 'add binary'");
+
+    let findings = scan_json_kind(&dir, Some("tree"));
+    let large = findings_matching(&findings, |f| {
+        f["title"].as_str().unwrap_or("").contains("Large binary")
+    });
+    assert_eq!(
+        large.len(),
+        1,
+        "expected 1 large-binary finding, got {}: {:#?}",
+        large.len(),
+        findings
+    );
+    assert_eq!(large[0]["severity"], "low");
+}
+
+/// Custom config with empty allowlist → large binary under docs/ IS flagged
+#[test]
+fn tree_large_binary_with_custom_allowlist() {
+    let dir = tempdir("custom-allowlist");
+    init_repo(&dir, "dev@example.com", "Dev");
+
+    // Write config that clears the skip prefixes
+    std::fs::write(
+        dir.join(".aftermath.toml"),
+        "[tree_scanner]\nlarge_binary_skip_prefixes = []\n",
+    )
+    .unwrap();
+
+    sh(&dir, "mkdir -p docs");
+    sh(
+        &dir,
+        "dd if=/dev/zero of=docs/big.bin bs=1024 count=2048 2>/dev/null",
+    );
+    sh(&dir, "echo 'src' > main.py");
+    sh(
+        &dir,
+        "git add . && git commit -q -m 'add docs binary with empty allowlist'",
+    );
+
+    let findings = scan_json_kind(&dir, Some("tree"));
+    let large = findings_matching(&findings, |f| {
+        f["title"].as_str().unwrap_or("").contains("Large binary")
+    });
+    assert_eq!(
+        large.len(),
+        1,
+        "expected 1 large-binary finding with empty allowlist, got {}: {:#?}",
+        large.len(),
+        findings
+    );
 }
 
 // --- tempdir helper --------------------------------------------------------
