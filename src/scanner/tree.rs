@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use git2::{ObjectType, Repository, TreeWalkMode, TreeWalkResult};
 use glob::Pattern;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::config::{PatternRule, TreeConfig};
@@ -14,6 +14,16 @@ struct CompiledRule {
     pattern: Pattern,
     severity: Severity,
     action_kind: String,
+    is_dir_pattern: bool,
+}
+
+/// Tracks collapsed children for a directory-pattern finding root.
+struct CollapsedDir {
+    severity: Severity,
+    action_kind: String,
+    raw_pattern: String,
+    context: String,
+    child_paths: Vec<String>,
 }
 
 pub fn scan(repo_path: &Path, cfg: &TreeConfig) -> Result<Vec<Finding>> {
@@ -89,6 +99,7 @@ fn compile_rules(rules: &[PatternRule]) -> Vec<CompiledRule> {
                 pattern: compiled,
                 severity,
                 action_kind: r.action.clone(),
+                is_dir_pattern: r.pattern.ends_with('/'),
             })
         })
         .collect()
@@ -103,6 +114,9 @@ fn walk_tree(
     seen_paths: &mut HashSet<String>,
     context: &str,
 ) -> Result<()> {
+    // collapsed_dirs: key = (pattern_raw, root_path), value = CollapsedDir
+    let mut collapsed_dirs: HashMap<(String, String), CollapsedDir> = HashMap::new();
+
     tree.walk(TreeWalkMode::PreOrder, |root, entry| {
         let name = match entry.name() {
             Some(n) => n,
@@ -117,49 +131,71 @@ fn walk_tree(
         for rule in rules {
             if matches_rule(&rule.pattern, &rule.raw, &full_path, name) {
                 seen_paths.insert(full_path.clone());
-                let action = build_action(&rule.action_kind, &full_path);
-                let mut evidence = vec![
-                    Evidence {
-                        kind: "path".into(),
-                        value: serde_json::json!(full_path),
-                    },
-                    Evidence {
-                        kind: "matched_pattern".into(),
-                        value: serde_json::json!(rule.raw),
-                    },
-                    Evidence {
-                        kind: "seen_in".into(),
-                        value: serde_json::json!(context),
-                    },
-                ];
 
-                // Try to enrich with size / mode
-                if let Ok(obj) = entry.to_object(repo) {
-                    if let Some(blob) = obj.as_blob() {
-                        evidence.push(Evidence {
-                            kind: "size_bytes".into(),
-                            value: serde_json::json!(blob.size()),
-                        });
+                // For directory patterns, collapse children under the top-level root
+                if rule.is_dir_pattern {
+                    let root_path = find_dir_root(&rule.raw, &full_path);
+                    let key = (rule.raw.clone(), root_path.clone());
+                    let entry = collapsed_dirs.entry(key).or_insert_with(|| CollapsedDir {
+                        severity: rule.severity,
+                        action_kind: rule.action_kind.clone(),
+                        raw_pattern: rule.raw.clone(),
+                        context: context.to_string(),
+                        child_paths: Vec::new(),
+                    });
+                    // Use max severity
+                    if rule.severity > entry.severity {
+                        entry.severity = rule.severity;
                     }
-                }
-                let filemode = entry.filemode();
-                evidence.push(Evidence {
-                    kind: "filemode_octal".into(),
-                    value: serde_json::json!(format!("{:o}", filemode)),
-                });
+                    // Don't add the root itself as a child
+                    if full_path != root_path {
+                        entry.child_paths.push(full_path.clone());
+                    }
+                } else {
+                    // Non-directory pattern: emit immediately as before
+                    let action = build_action(&rule.action_kind, &full_path);
+                    let mut evidence = vec![
+                        Evidence {
+                            kind: "path".into(),
+                            value: serde_json::json!(full_path),
+                        },
+                        Evidence {
+                            kind: "matched_pattern".into(),
+                            value: serde_json::json!(rule.raw),
+                        },
+                        Evidence {
+                            kind: "seen_in".into(),
+                            value: serde_json::json!(context),
+                        },
+                    ];
 
-                findings.push(Finding {
-                    id: Finding::stable_id(ScannerKind::Tree, &full_path),
-                    scanner: ScannerKind::Tree,
-                    severity: rule.severity,
-                    locator: full_path.clone(),
-                    title: format!(
-                        "Forbidden path tracked in repo: '{}' (matches '{}')",
-                        full_path, rule.raw
-                    ),
-                    evidence,
-                    suggested_action: action,
-                });
+                    if let Ok(obj) = entry_to_object(repo, entry) {
+                        if let Some(blob) = obj.as_blob() {
+                            evidence.push(Evidence {
+                                kind: "size_bytes".into(),
+                                value: serde_json::json!(blob.size()),
+                            });
+                        }
+                    }
+                    let filemode = entry.filemode();
+                    evidence.push(Evidence {
+                        kind: "filemode_octal".into(),
+                        value: serde_json::json!(format!("{:o}", filemode)),
+                    });
+
+                    findings.push(Finding {
+                        id: Finding::stable_id(ScannerKind::Tree, &full_path),
+                        scanner: ScannerKind::Tree,
+                        severity: rule.severity,
+                        locator: full_path.clone(),
+                        title: format!(
+                            "Forbidden path tracked in repo: '{}' (matches '{}')",
+                            full_path, rule.raw
+                        ),
+                        evidence,
+                        suggested_action: action,
+                    });
+                }
                 break;
             }
         }
@@ -170,39 +206,46 @@ fn walk_tree(
                 if let Some(blob) = obj.as_blob() {
                     let size = blob.size() as u64;
                     if size > cfg.max_tracked_bytes && looks_binary(blob.content()) {
-                        seen_paths.insert(full_path.clone());
-                        findings.push(Finding {
-                            id: Finding::stable_id(ScannerKind::Tree, &full_path),
-                            scanner: ScannerKind::Tree,
-                            severity: Severity::Medium,
-                            locator: full_path.clone(),
-                            title: format!(
-                                "Large binary tracked in repo: '{}' ({} bytes)",
-                                full_path, size
-                            ),
-                            evidence: vec![
-                                Evidence {
-                                    kind: "path".into(),
-                                    value: serde_json::json!(full_path),
+                        // Skip large-binary findings under allowlisted prefixes
+                        if !cfg
+                            .large_binary_skip_prefixes
+                            .iter()
+                            .any(|prefix| full_path.starts_with(prefix.as_str()))
+                        {
+                            seen_paths.insert(full_path.clone());
+                            findings.push(Finding {
+                                id: Finding::stable_id(ScannerKind::Tree, &full_path),
+                                scanner: ScannerKind::Tree,
+                                severity: Severity::Low,
+                                locator: full_path.clone(),
+                                title: format!(
+                                    "Large binary tracked in repo: '{}' ({} bytes)",
+                                    full_path, size
+                                ),
+                                evidence: vec![
+                                    Evidence {
+                                        kind: "path".into(),
+                                        value: serde_json::json!(full_path),
+                                    },
+                                    Evidence {
+                                        kind: "size_bytes".into(),
+                                        value: serde_json::json!(size),
+                                    },
+                                    Evidence {
+                                        kind: "seen_in".into(),
+                                        value: serde_json::json!(context),
+                                    },
+                                    Evidence {
+                                        kind: "reason".into(),
+                                        value: serde_json::json!("exceeds max_tracked_bytes and looks binary"),
+                                    },
+                                ],
+                                suggested_action: SuggestedAction::ReviewAndConfirm {
+                                    reason: "Large binary file tracked in Git; consider git-lfs or .gitignore.".into(),
+                                    suggested_command: None,
                                 },
-                                Evidence {
-                                    kind: "size_bytes".into(),
-                                    value: serde_json::json!(size),
-                                },
-                                Evidence {
-                                    kind: "seen_in".into(),
-                                    value: serde_json::json!(context),
-                                },
-                                Evidence {
-                                    kind: "reason".into(),
-                                    value: serde_json::json!("exceeds max_tracked_bytes and looks binary"),
-                                },
-                            ],
-                            suggested_action: SuggestedAction::ReviewAndConfirm {
-                                reason: "Large binary file tracked in Git; consider git-lfs or .gitignore.".into(),
-                                suggested_command: None,
-                            },
-                        });
+                            });
+                        }
                     }
                 }
             }
@@ -247,7 +290,80 @@ fn walk_tree(
 
         TreeWalkResult::Ok
     })?;
+
+    // Emit collapsed directory-pattern findings
+    for ((_, root_path), collapsed) in collapsed_dirs {
+        let child_count = collapsed.child_paths.len();
+        let action = build_action(&collapsed.action_kind, &root_path);
+        let sample_children: Vec<&str> = collapsed
+            .child_paths
+            .iter()
+            .take(5)
+            .map(|s| s.as_str())
+            .collect();
+        let mut evidence = vec![
+            Evidence {
+                kind: "path".into(),
+                value: serde_json::json!(root_path),
+            },
+            Evidence {
+                kind: "matched_pattern".into(),
+                value: serde_json::json!(collapsed.raw_pattern),
+            },
+            Evidence {
+                kind: "seen_in".into(),
+                value: serde_json::json!(collapsed.context),
+            },
+            Evidence {
+                kind: "child_count".into(),
+                value: serde_json::json!(child_count),
+            },
+        ];
+        if !sample_children.is_empty() {
+            evidence.push(Evidence {
+                kind: "sample_children".into(),
+                value: serde_json::json!(sample_children),
+            });
+        }
+
+        findings.push(Finding {
+            id: Finding::stable_id(ScannerKind::Tree, &root_path),
+            scanner: ScannerKind::Tree,
+            severity: collapsed.severity,
+            locator: root_path.clone(),
+            title: format!(
+                "Forbidden path tracked in repo: '{}' (matches '{}')",
+                root_path, collapsed.raw_pattern
+            ),
+            evidence,
+            suggested_action: action,
+        });
+    }
+
     Ok(())
+}
+
+/// For a directory pattern (e.g. ".venv/"), find the top-level root in a full path.
+/// E.g. for pattern ".venv/" and path ".venv/lib/python3.11", returns ".venv".
+fn find_dir_root(raw_pattern: &str, full_path: &str) -> String {
+    let dir = raw_pattern.strip_suffix('/').unwrap_or(raw_pattern);
+    let parts: Vec<&str> = full_path.split('/').collect();
+    // Find the first component matching the dir name
+    for (i, part) in parts.iter().enumerate() {
+        if *part == dir {
+            // Root is everything up to and including this component
+            return parts[..=i].join("/");
+        }
+    }
+    full_path.to_string()
+}
+
+/// Wrapper to avoid name collision with `entry` variable in the closure.
+fn entry_to_object<'a>(
+    repo: &'a Repository,
+    entry: &git2::TreeEntry<'_>,
+) -> std::result::Result<git2::Object<'a>, git2::Error> {
+    entry.to_object(repo)
 }
 
 fn matches_rule(pat: &Pattern, raw: &str, full_path: &str, name: &str) -> bool {

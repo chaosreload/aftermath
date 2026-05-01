@@ -41,6 +41,9 @@ max_tracked_bytes = 1048576
 flag_symlinks = true
 # How many recent commits to scan beyond HEAD
 recent_commits = 20
+# Skip large-binary findings under these path prefixes (documentation dirs).
+# Set to [] to disable and flag large binaries everywhere.
+large_binary_skip_prefixes = ["docs/", "doc/", "assets/", "public/", "static/", "media/", "images/", "img/", "website/"]
 
 [reflog_scanner]
 # Author emails to flag in reflog (unreachable AI commits)
@@ -100,6 +103,8 @@ pub struct TreeConfig {
     pub flag_symlinks: bool,
     #[serde(default = "default_recent_commits")]
     pub recent_commits: u32,
+    #[serde(default = "default_large_binary_skip_prefixes")]
+    pub large_binary_skip_prefixes: Vec<String>,
 }
 
 impl Default for TreeConfig {
@@ -109,6 +114,7 @@ impl Default for TreeConfig {
             max_tracked_bytes: default_max_bytes(),
             flag_symlinks: default_flag_symlinks(),
             recent_commits: default_recent_commits(),
+            large_binary_skip_prefixes: default_large_binary_skip_prefixes(),
         }
     }
 }
@@ -198,6 +204,20 @@ fn default_window_size() -> u32 {
 
 fn default_ai_ratio_threshold() -> f64 {
     0.3
+}
+
+fn default_large_binary_skip_prefixes() -> Vec<String> {
+    vec![
+        "docs/".into(),
+        "doc/".into(),
+        "assets/".into(),
+        "public/".into(),
+        "static/".into(),
+        "media/".into(),
+        "images/".into(),
+        "img/".into(),
+        "website/".into(),
+    ]
 }
 
 fn default_tree_patterns() -> Vec<PatternRule> {
