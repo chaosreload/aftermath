@@ -7,6 +7,8 @@ description = "Scan Git repos for AI-agent footprints (abandoned branches, pollu
 license = "MIT"
 repository = "https://github.com/chaosreload/aftermath"
 readme = "README.md"
+keywords = ["git", "ai-agent", "security", "audit", "cleanup"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1"
