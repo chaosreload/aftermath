@@ -136,6 +136,26 @@ fn cmd_scan(
 
     findings.retain(|f| f.severity as u8 >= min_sev as u8);
 
+    // Always save last report to ~/.cache/aftermath/last-report.json
+    if let Some(home) = std::env::var_os("HOME") {
+        let cache_dir = PathBuf::from(home).join(".cache/aftermath");
+        if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+            eprintln!("warning: could not create {}: {e}", cache_dir.display());
+        } else {
+            let report_path = cache_dir.join("last-report.json");
+            match serde_json::to_string_pretty(&findings) {
+                Ok(json) => {
+                    if let Err(e) = std::fs::write(&report_path, json) {
+                        eprintln!("warning: could not write {}: {e}", report_path.display());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("warning: could not serialize findings: {e}");
+                }
+            }
+        }
+    }
+
     match format {
         OutputFormat::Summary => output::render_summary(&findings),
         OutputFormat::Json => output::render_json(&findings)?,
@@ -145,7 +165,10 @@ fn cmd_scan(
 }
 
 fn cmd_explain(id: String, report: Option<PathBuf>) -> Result<()> {
-    let path = report.unwrap_or_else(|| PathBuf::from(".aftermath/last-report.json"));
+    let path = report.unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| String::from("/root"));
+        PathBuf::from(home).join(".cache/aftermath/last-report.json")
+    });
     let data = std::fs::read_to_string(&path)
         .with_context(|| format!("reading report {}", path.display()))?;
     let findings: Vec<finding::Finding> = serde_json::from_str(&data)?;
